@@ -1,0 +1,547 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User Roles
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  DOCTOR
+  NURSE
+  RECEPTIONIST
+  HR_MANAGER
+  LAB_TECHNICIAN
+  PATIENT
+}
+
+enum AuditAction {
+  USER_LOGIN
+  USER_LOGOUT
+  USER_CREATE
+  USER_UPDATE
+  USER_DELETE
+  TENANT_CREATE
+  TENANT_UPDATE
+  TENANT_MODULE_TOGGLE
+  PRESCRIPTION_CREATE
+  PRESCRIPTION_UPDATE
+  APPOINTMENT_CREATE
+  APPOINTMENT_UPDATE
+  APPOINTMENT_CANCEL
+  BILL_CREATE
+  BILL_PAY
+  LAB_ORDER_CREATE
+  LAB_RESULT_UPLOAD
+}
+
+// Subscription Plans
+enum PlanType {
+  FREE
+  BASIC
+  PROFESSIONAL
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  GRACE
+  EXPIRED
+  RESTRICTED
+}
+
+// -----------------------------------------------------------------------------
+// PUBLIC SCHEMA (Shared)
+// -----------------------------------------------------------------------------
+
+model Tenant {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique // Subdomain
+  domain    String?  @unique // Custom domain
+  plan      PlanType @default(FREE)
+  status    SubscriptionStatus @default(ACTIVE)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Settings
+  branding Json? // { logo, colors, etc. }
+  settings Json? // { features, limits }
+
+  // Relations
+  users         User[]
+  patients      PatientProfile[]
+  doctors       DoctorProfile[]
+  departments   Department[]
+  appointments  Appointment[]
+  inventory     Inventory[]
+  prescriptions Prescription[]
+  bills         Bill[]
+  labTests      LabTest[]
+  labOrders     LabOrder[]
+  staffProfiles StaffProfile[]
+  attendance    Attendance[]
+  leaves        Leave[]
+  campaigns     Campaign[]
+  surveys       Survey[]
+  auditLogs     AuditLog[]
+  sessions      Session[]
+  vitals        Vitals[]
+
+  @@index([slug])
+  @@index([domain])
+  @@map("tenants")
+}
+
+model Department {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  headDoctorId String? // Optional head of department
+  
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  otherDoctors DoctorProfile[]
+  staff        StaffProfile[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([name, tenantId])
+  @@index([tenantId])
+  @@map("departments")
+}
+
+// -----------------------------------------------------------------------------
+// TENANT SCHEMA (Logical Separation via tenantId)
+// -----------------------------------------------------------------------------
+
+model User {
+  id        String   @id @default(uuid())
+  email     String
+  password  String // Hashed
+  role      UserRole @default(PATIENT)
+  name      String?
+  phone     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Multi-tenancy
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Profile Relations
+  patientProfile PatientProfile?
+  doctorProfile  DoctorProfile?
+  staffProfile   StaffProfile?
+  auditLogs      AuditLog[]
+  sessions       Session[]
+
+  @@unique([email, tenantId]) // Email unique per tenant, but can exist in multiple tenants
+  @@index([tenantId])
+  @@index([email])
+  @@map("users")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  // Actor
+  action    AuditAction   
+  entity    String   // e.g., "Prescription", "User"
+  entityId  String?
+  details   Json?    // Contextual data
+  ipAddress String?
+  userAgent String?
+  
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([action])
+  @@map("audit_logs")
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([userId])
+  @@map("sessions")
+}
+
+model PatientProfile {
+  id             String    @id @default(uuid())
+  dob            DateTime?
+  gender         String?
+  address        String?
+  medicalHistory Json?
+  relationship   String?
+
+  // Relations
+  userId String? @unique
+  user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Family Relations
+  parentId String?
+  parent   PatientProfile?  @relation("FamilyMembers", fields: [parentId], references: [id])
+  dependents PatientProfile[] @relation("FamilyMembers")
+
+
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  appointments  Appointment[]
+  prescriptions Prescription[]
+  bills         Bill[]
+  labOrders     LabOrder[]
+  surveyResponses SurveyResponse[]
+  vitals        Vitals[]
+
+  @@index([tenantId])
+  @@index([userId])
+  @@map("patient_profiles")
+}
+
+model DoctorProfile {
+  id             String  @id @default(uuid())
+  specialization String
+  licenseNumber  String?
+  availability   Json? // { days, hours }
+  
+  departmentId   String?
+  department     Department? @relation(fields: [departmentId], references: [id])
+
+  bio            String?     @db.Text
+  qualifications String?
+  experienceYears Int?       @default(0)
+  gender         String?     // MALE, FEMALE, OTHER
+  consultationFee Float?     @default(0)
+
+  // Relations
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  appointments  Appointment[]
+  prescriptions Prescription[]
+  bills         Bill[]
+  labOrders     LabOrder[]
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([specialization])
+  @@map("doctor_profiles")
+}
+
+model Appointment {
+  id        String   @id @default(uuid())
+  startTime DateTime
+  endTime   DateTime
+  status    String   @default("SCHEDULED") // SCHEDULED, COMPLETED, CANCELLED
+  reason    String?
+  labOrders LabOrder[]
+  vitals    Vitals[]
+
+  // Relations
+  patientId String
+  patient   PatientProfile @relation(fields: [patientId], references: [id])
+
+  doctorId String
+  doctor   DoctorProfile @relation(fields: [doctorId], references: [id])
+
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([patientId])
+  @@index([doctorId])
+  @@index([startTime])
+  @@map("appointments")
+}
+
+model Inventory {
+  id           String    @id @default(uuid())
+  name         String
+  category     String?
+  quantity     Int       @default(0)
+  unit         String? // tablets, ml, box
+  reorderLevel Int       @default(10)
+  expiryDate   DateTime?
+
+  // Relations
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([name])
+  @@map("inventory")
+}
+
+model Prescription {
+  id          String   @id @default(uuid())
+  diagnosis   String?
+  medications Json // Array of { name, dosage, frequency, duration }
+  notes       String?
+  createdAt   DateTime @default(now())
+
+  // Relations
+  appointmentId String? // Optional link to appointment
+
+  patientId String
+  patient   PatientProfile @relation(fields: [patientId], references: [id])
+
+  doctorId String
+  doctor   DoctorProfile @relation(fields: [doctorId], references: [id])
+
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([patientId])
+  @@index([doctorId])
+  @@map("prescriptions")
+}
+
+model Bill {
+  id           String   @id @default(uuid())
+  amount       Float
+  status       String   @default("PENDING") // PENDING, PAID, CANCELLED
+  paymentMethod String? // CASH, CARD, UPI
+  items        Json     // Array of { name, quantity, price, total }
+  
+  // Relations
+  patientId    String?
+  patient      PatientProfile? @relation(fields: [patientId], references: [id])
+  
+  doctorId     String?
+  doctor       DoctorProfile? @relation(fields: [doctorId], references: [id])
+
+  tenantId     String
+  tenant       Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([patientId])
+  @@map("bills")
+}
+
+model LabTest {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  price       Float
+  category    String? // Blood, Radiology, etc.
+  
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([tenantId])
+  @@map("lab_tests")
+}
+
+model LabOrder {
+  id            String   @id @default(uuid())
+  status        String   @default("PENDING") // PENDING, COLLECTED, COMPLETED, CANCELLED
+  result        String?  // Textual result or notes
+  reportUrl     String?  // URL to PDF
+  totalAmount   Float
+  
+  // Relations
+  patientId     String
+  patient       PatientProfile @relation(fields: [patientId], references: [id])
+  
+  doctorId      String?
+  doctor        DoctorProfile? @relation(fields: [doctorId], references: [id])
+
+  tenantId      String
+  tenant        Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  appointmentId String?
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id])
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([patientId])
+  @@map("lab_orders")
+}
+
+model StaffProfile {
+  id           String   @id @default(uuid())
+  joiningDate  DateTime @default(now())
+  salary       Float?
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id])
+
+  // Relations
+  userId       String   @unique
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  attendance   Attendance[]
+  leaves       Leave[]
+
+  @@index([tenantId])
+  @@index([userId])
+  @@map("staff_profiles")
+}
+
+model Attendance {
+  id             String   @id @default(uuid())
+  date           DateTime @default(now())
+  checkIn        DateTime?
+  checkOut       DateTime?
+  status         String   @default("PRESENT") // PRESENT, ABSENT, LATE
+
+  staffId        String
+  staff          StaffProfile @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  tenantId       String
+  tenant         Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([staffId])
+  @@map("attendance")
+}
+
+model Leave {
+  id             String   @id @default(uuid())
+  startDate      DateTime
+  endDate        DateTime
+  type           String   // CASUAL, SICK, VACATION
+  reason         String?
+  status         String   @default("PENDING") // PENDING, APPROVED, REJECTED
+
+  staffId        String
+  staff          StaffProfile @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  tenantId       String
+  tenant         Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([staffId])
+  @@map("leaves")
+}
+
+model Campaign {
+  id          String   @id @default(uuid())
+  title       String
+  type        String   // EMAIL, SMS
+  content     String
+  status      String   @default("DRAFT") // DRAFT, SCHEDULED, SENT
+  scheduledAt DateTime?
+  createdAt   DateTime @default(now())
+
+  tenantId    String
+  tenant      Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("campaigns")
+}
+
+model Survey {
+  id          String   @id @default(uuid())
+  title       String
+  description String?
+  status      String   @default("DRAFT") // DRAFT, ACTIVE, CLOSED
+  createdAt   DateTime @default(now())
+
+  questions   SurveyQuestion[]
+  responses   SurveyResponse[]
+
+  tenantId    String
+  tenant      Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("surveys")
+}
+
+model SurveyQuestion {
+  id          String   @id @default(uuid())
+  question    String
+  type        String   // TEXT, RATING, MULTIPLE_CHOICE
+  options     String?  // JSON string for choices
+  order       Int      @default(0)
+
+  surveyId    String
+  survey      Survey @relation(fields: [surveyId], references: [id], onDelete: Cascade)
+
+  @@index([surveyId])
+  @@map("survey_questions")
+}
+
+model SurveyResponse {
+  id         String   @id @default(uuid())
+  answers    String   // JSON string of answers
+  submittedAt DateTime @default(now())
+
+  surveyId   String
+  survey     Survey @relation(fields: [surveyId], references: [id], onDelete: Cascade)
+
+  patientId  String?
+  patient    PatientProfile? @relation(fields: [patientId], references: [id])
+
+  @@index([surveyId])
+  @@index([patientId])
+  @@map("survey_responses")
+}
+
+model Vitals {
+  id              String   @id @default(uuid())
+  bloodPressure   String?  // e.g., "120/80"
+  heartRate       Int?     // bpm
+  temperature     Float?   // Celsius
+  weight          Float?   // kg
+  height          Float?   // cm
+  spO2            Int?     // %
+  respiratoryRate Int?     // breaths/min
+  recordedAt      DateTime @default(now())
+
+  // Relations
+  patientId String
+  patient   PatientProfile @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  appointmentId String?
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id])
+
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([patientId])
+  @@index([tenantId])
+  @@index([recordedAt])
+  @@map("vitals")
+}
